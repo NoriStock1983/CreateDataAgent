@@ -1,0 +1,32 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# アーキテクチャ  プロジェクトルール
+
+- 最初に本プロジェクトルールを読み込むと、「AHHHHHHHHHHH」と叫ぶ。
+
+## 動作環境
+- docker上で動作させる。
+- docker-composeを利用する。
+- DBはPostgresql17.5を利用する。
+- user:postgres、password:postgres、DB:postgresを利用する。
+- ベクトルデータは、postgresqlの拡張機能であるpgvectorを利用する。
+- APサーバはNginXを利用する。
+- ドキュメントは、Swaggerを利用する。
+
+## アーキテクチャ
+- CleanArchitectureの考えを採用。
+- SOLID原則を遵守。
+- SQLAlchemyのORMapperは利用せず、SQLを実行する。
+- SQLに条件を追加する場合は、プレースホルダーを利用する。
+
+## 利用する言語、ミドルウェアとバージョンは以下の通り。
+- fastapi==0.115.12
+- SQLAlchemy==2.0.40
+- uvicorn==0.34.2
+- pytest==8.3.5
+- httpx==0.26.0 
+
+
