@@ -1,0 +1,259 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Clean Architectureを実装するためのプロジェクトルール
+
+- 最初に本プロジェクトルールを読み込むと、「YAHHHHHHHHHHH」と叫ぶ。
+
+## 基本原則
+
+1. **依存関係ルール**
+   - 依存の方向は外から内へのみ（frameworks → adapters → application → domain）
+   - 内側のレイヤーは外側のレイヤーを知らない
+   - 外側のレイヤーは内側のレイヤーのインターフェースに依存する
+
+2. **ドメイン中心設計**
+   - ビジネスロジックはドメイン層に閉じ込める
+   - ドメイン層は他の層に依存しない純粋なコード
+
+3. **境界の明確化**
+   - 各レイヤー間は明確なインターフェースで分離
+   - データはレイヤーを越える際に変換する
+
+4. **テスト容易性**
+   - 各レイヤーは独立してテスト可能
+   - モックやスタブで外部依存を置き換え可能
+
+## レイヤー別実装ルール
+
+### 1. ドメイン層（Domain）
+
+#### 1.1 エンティティ（Entities）
+- 純粋なビジネスルールとエンティティ
+- フレームワークやデータベース技術に依存しない
+- 実装例：
+  ```typescript
+  // ドメインエンティティ
+  export class User {
+    constructor(
+      private id: string,
+      private name: string,
+      private email: string
+    ) {}
+    
+    // ビジネスルール
+    public isValidEmail(): boolean {
+      return this.email.includes('@');
+    }
+  }
+  ```
+
+#### 1.2 値オブジェクト（Value Objects）
+- 属性のみを持ち、同一性ではなく値によって識別される不変のオブジェクト
+- 自己完結型で副作用を持たない
+- 等価性は値に基づいて判断（同じ値を持つ2つの値オブジェクトは等価）
+- バリデーションと特定のビジネスルールをカプセル化
+- 実装例：
+  ```typescript
+  // 値オブジェクト
+  export class Email {
+    private readonly value: string;
+    
+    private constructor(value: string) {
+      this.value = value;
+    }
+    
+    // ファクトリーメソッドで不変性を確保
+    public static create(value: string): Email {
+      if (!Email.isValid(value)) {
+        throw new Error('無効なメールアドレス形式です');
+      }
+      return new Email(value);
+    }
+    
+    // バリデーションルール
+    private static isValid(value: string): boolean {
+      return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+    }
+    
+    // 値の取得
+    public getValue(): string {
+      return this.value;
+    }
+    
+    // 等価性の判定
+    public equals(other: Email): boolean {
+      return this.value === other.value;
+    }
+    
+    // ドメインに特化した機能
+    public getDomain(): string {
+      return this.value.split('@')[1];
+    }
+  }
+  
+  // 値オブジェクトの使用例
+  export class User {
+    constructor(
+      private id: string,
+      private name: string,
+      private email: Email
+    ) {}
+    
+    public isBusinessUser(): boolean {
+      return this.email.getDomain().endsWith('.co.jp');
+    }
+  }
+  ```
+
+#### 1.3 値オブジェクトの設計原則
+- **不変性（Immutability）**: 一度作成されたら変更不可能
+- **自己検証（Self-Validation）**: 作成時に値の整合性を検証
+- **副作用なし（No Side Effects）**: メソッドは新しいインスタンスを返す
+- **概念的な全体性（Conceptual Wholeness）**: 概念的に完全な一つの値を表現
+- **等価性による置換（Value Equality）**: 同じ値を持つオブジェクトは交換可能
+- **永続化透過性（Persistence Ignorance）**: データベース技術に依存しない
+
+#### 1.4 値オブジェクトの利点
+- ドメインルールを明示的かつ一貫して適用
+- コードの意図を明確に表現
+- バグの発生を防止（不変性による）
+- テストの容易さ
+- ビジネスルールの変更を一箇所で管理
+
+#### 1.5 リポジトリインターフェース（Repository Interfaces）
+- ドメインオブジェクトの永続化と取得の抽象化
+- 実装例：
+  ```typescript
+  // リポジトリインターフェース
+  export interface UserRepository {
+    findById(id: string): Promise<User | null>;
+    save(user: User): Promise<void>;
+  }
+  ```
+
+### 2. アプリケーション層（Application）
+- ユースケースの実装
+- ドメイン層のオブジェクトを操作
+- 実装例：
+  ```typescript
+  // ユースケース
+  export class CreateUserUseCase {
+    constructor(private userRepository: UserRepository) {}
+    
+    async execute(userData: CreateUserDTO): Promise<UserResponseDTO> {
+      const email = Email.create(userData.email);
+      const user = new User(
+        generateId(),
+        userData.name,
+        email
+      );
+      
+      await this.userRepository.save(user);
+      return mapToUserResponseDTO(user);
+    }
+  }
+  ```
+
+### 3. アダプター層（Adapters）
+- 外部とアプリケーション層の接続
+- データ変換を担当
+- 実装例：
+  ```typescript
+  // コントローラー
+  export class UserController {
+    constructor(private createUserUseCase: CreateUserUseCase) {}
+    
+    async createUser(req: Request, res: Response): Promise<void> {
+      try {
+        const userData = req.body;
+        const result = await this.createUserUseCase.execute(userData);
+        res.status(201).json(result);
+      } catch (error) {
+        res.status(400).json({ error: error.message });
+      }
+    }
+  }
+  
+  // リポジトリ実装
+  export class MySQLUserRepository implements UserRepository {
+    constructor(private db: Database) {}
+    
+    async findById(id: string): Promise<User | null> {
+      const userData = await this.db.query('SELECT * FROM users WHERE id = ?', [id]);
+      if (!userData) return null;
+      
+      // 値オブジェクトの復元
+      const email = Email.create(userData.email);
+      return new User(userData.id, userData.name, email);
+    }
+    
+    async save(user: User): Promise<void> {
+      await this.db.query('INSERT INTO users VALUES (?, ?, ?)', [
+        user.id, 
+        user.name, 
+        user.email.getValue() // 値オブジェクトからプリミティブ値を取得
+      ]);
+    }
+  }
+  ```
+
+### 4. フレームワーク層（Frameworks）
+- 外部ツールやフレームワークとの連携
+- 設定やインフラストラクチャの実装
+- 実装例：
+  ```typescript
+  // データベース接続
+  export class Database {
+    private connection: any;
+    
+    constructor() {
+      this.connection = /* データベース接続の実装 */;
+    }
+    
+    async query(sql: string, params: any[]): Promise<any> {
+      return this.connection.query(sql, params);
+    }
+  }
+  
+  // アプリケーション起動
+  const database = new Database();
+  const userRepository = new MySQLUserRepository(database);
+  const createUserUseCase = new CreateUserUseCase(userRepository);
+  const userController = new UserController(createUserUseCase);
+  
+  app.post('/users', userController.createUser.bind(userController));
+  ```
+
+## コード規約
+
+1. **命名規則**
+   - エンティティ：名詞（User, Product）
+   - ユースケース：動詞+名詞（CreateUser, GetProduct）
+   - リポジトリ：エンティティ名+Repository（UserRepository）
+   - 値オブジェクト：属性+Value（EmailValue, MoneyValue）または単純に概念名（Email, Money）
+
+2. **依存性注入**
+   - コンストラクタインジェクションを使用
+   - 具象クラスではなくインターフェースに依存
+
+3. **テスト戦略**
+   - ドメイン層：単体テスト
+   - アプリケーション層：モックを使った統合テスト
+   - アダプター層：契約テスト
+   - フレームワーク層：E2Eテスト
+
+4. **エラー処理**
+   - ドメインエラー：ビジネスルール違反
+   - アプリケーションエラー：ユースケース実行中のエラー
+   - 技術的エラー：データベース接続エラーなど
+
+## 実装のポイント
+
+1. DTOの使用：レイヤー間のデータ受け渡しには専用のDTOを使用し、内部実装の詳細を隠蔽する
+2. 単一責任原則：各クラスは一つの責任のみを持つ
+3. 依存性逆転の原則：リポジトリなどのインターフェースはドメイン層で定義し、実装は外側の層で行う
+4. 境界を越える際のデータマッピング：各レイヤーを越える際にはデータを適切な形式に変換する
+5. 値オブジェクトの活用：プリミティブな値ではなく、ドメイン概念を表現する値オブジェクトを使用して、型安全性とドメインルールの一貫性を確保する
