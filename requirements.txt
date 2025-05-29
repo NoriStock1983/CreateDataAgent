@@ -1,0 +1,16 @@
+# FastAPI関連
+fastapi==0.115.12
+uvicorn==0.34.2
+
+# データベース関連
+SQLAlchemy==2.0.40
+pgvector
+psycopg2-binary
+
+# テスト関連
+pytest==8.3.5
+httpx==0.26.0
+
+# その他の開発用ツール
+python-dotenv
+pydantic 

@@ -1,7 +1,7 @@
 ---
 description: 
 globs: 
-alwaysApply: false
+alwaysApply: true
 ---
 # アーキテクチャ  プロジェクトルール
 
@@ -25,6 +25,7 @@ alwaysApply: false
 ## 利用する言語、ミドルウェアとバージョンは以下の通り。
 - fastapi==0.115.12
 - SQLAlchemy==2.0.40
+- pgvector==latest
 - uvicorn==0.34.2
 - pytest==8.3.5
 - httpx==0.26.0 

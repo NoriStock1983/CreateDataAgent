@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  # PostgreSQL 17.5 with pgvector
+  database:
+    image: postgres:17.5
+    container_name: createdata_postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/init:/docker-entrypoint-initdb.d
+    command: postgres -c shared_preload_libraries=vector
+
+  # FastAPI application
+  app:
+    build: .
+    container_name: createdata_app
+    ports:
+      - "8000:8000"
+    depends_on:
+      - database
+    environment:
+      - DATABASE_URL=postgresql://postgres:postgres@database:5432/postgres
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+
+  # Nginx reverse proxy
+  nginx:
+    image: nginx:alpine
+    container_name: createdata_nginx
+    ports:
+      - "80:80"
+    depends_on:
+      - app
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+
+volumes:
+  postgres_data: 
