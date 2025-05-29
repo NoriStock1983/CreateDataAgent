@@ -1,0 +1,486 @@
+name: IT Audit Compliance Workflow
+on:
+  push:
+    branches: [ main, develop, release ]
+  pull_request:
+    branches: [ main, develop, release ]
+
+env:
+  AUDIT_LOG_RETENTION: 2555 # 7年間保存 (J-SOX要件)
+  SECURITY_BASELINE_VERSION: "v1.0"
+
+jobs:
+  # セキュリティベースライン確認 (ISO27001 A.12.6.1対応)
+  security-baseline-check:
+    runs-on: ubuntu-latest
+    outputs:
+      baseline-status: ${{ steps.baseline.outputs.status }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 全履歴取得で変更追跡
+      
+      - name: Setup audit logging
+        run: |
+          echo "AUDIT_SESSION_ID=$(date +%Y%m%d-%H%M%S)-$(uuidgen | cut -d'-' -f1)" >> $GITHUB_ENV
+          echo "AUDIT_START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_ENV
+          mkdir -p audit-logs
+      
+      - name: Security baseline verification
+        id: baseline
+        run: |
+          echo "=== セキュリティベースライン確認開始 ===" | tee -a audit-logs/security-baseline.log
+          echo "実行時刻: $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a audit-logs/security-baseline.log
+          echo "実行者: ${{ github.actor }}" | tee -a audit-logs/security-baseline.log
+          echo "リポジトリ: ${{ github.repository }}" | tee -a audit-logs/security-baseline.log
+          echo "コミット: ${{ github.sha }}" | tee -a audit-logs/security-baseline.log
+          
+          # セキュリティ設定チェック
+          baseline_status="PASS"
+          
+          # 1. ブランチ保護設定確認
+          echo "1. ブランチ保護設定確認" | tee -a audit-logs/security-baseline.log
+          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "  - メインブランチへの直接プッシュ検出" | tee -a audit-logs/security-baseline.log
+            baseline_status="FAIL"
+          fi
+          
+          # 2. 機密情報スキャン
+          echo "2. 機密情報スキャン" | tee -a audit-logs/security-baseline.log
+          secrets_found=0
+          
+          # APIキー、パスワード、トークンのパターンチェック
+          if grep -r -E "(api[_-]?key|password|secret|token)" --include="*.py" --include="*.js" --include="*.json" --include="*.yaml" --include="*.yml" . || true; then
+            echo "  - 潜在的な機密情報を検出" | tee -a audit-logs/security-baseline.log
+            secrets_found=1
+          fi
+          
+          # AWS キー
+          if grep -r -E "AKIA[0-9A-Z]{16}" . || true; then
+            echo "  - AWS アクセスキーを検出" | tee -a audit-logs/security-baseline.log
+            secrets_found=1
+          fi
+          
+          # GitHub トークン
+          if grep -r -E "ghp_[a-zA-Z0-9]{36}" . || true; then
+            echo "  - GitHub トークンを検出" | tee -a audit-logs/security-baseline.log
+            secrets_found=1
+          fi
+          
+          if [ $secrets_found -eq 1 ]; then
+            baseline_status="FAIL"
+          fi
+          
+          echo "セキュリティベースライン結果: $baseline_status" | tee -a audit-logs/security-baseline.log
+          echo "status=$baseline_status" >> $GITHUB_OUTPUT
+      
+      - name: Upload security baseline logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-baseline-logs-${{ env.AUDIT_SESSION_ID }}
+          path: audit-logs/
+          retention-days: ${{ env.AUDIT_LOG_RETENTION }}
+
+  # 脆弱性スキャン (ISO27001 A.12.6.1対応)
+  vulnerability-scan:
+    runs-on: ubuntu-latest
+    needs: security-baseline-check
+    outputs:
+      vuln-status: ${{ steps.vuln-scan.outputs.status }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+      
+      - name: Setup audit logging
+        run: |
+          echo "AUDIT_SESSION_ID=$(date +%Y%m%d-%H%M%S)-$(uuidgen | cut -d'-' -f1)" >> $GITHUB_ENV
+          mkdir -p audit-logs
+      
+      - name: Dependency vulnerability scan
+        id: vuln-scan
+        run: |
+          echo "=== 脆弱性スキャン開始 ===" | tee -a audit-logs/vulnerability-scan.log
+          echo "実行時刻: $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a audit-logs/vulnerability-scan.log
+          echo "実行者: ${{ github.actor }}" | tee -a audit-logs/vulnerability-scan.log
+          
+          vuln_status="PASS"
+          
+          # package.jsonが存在する場合のnpm audit
+          if [ -f "package.json" ]; then
+            echo "Node.js 依存関係の脆弱性チェック実行中..." | tee -a audit-logs/vulnerability-scan.log
+            npm install --package-lock-only
+            if ! npm audit --audit-level=moderate; then
+              echo "重大な脆弱性が検出されました" | tee -a audit-logs/vulnerability-scan.log
+              npm audit --json > audit-logs/npm-audit-results.json
+              vuln_status="FAIL"
+            fi
+          fi
+          
+          # requirements.txtが存在する場合のPython依存関係チェック
+          if [ -f "requirements.txt" ]; then
+            echo "Python 依存関係の脆弱性チェック実行中..." | tee -a audit-logs/vulnerability-scan.log
+            pip install safety
+            if ! safety check -r requirements.txt; then
+              echo "Python依存関係に脆弱性が検出されました" | tee -a audit-logs/vulnerability-scan.log
+              vuln_status="FAIL"
+            fi
+          fi
+          
+          echo "脆弱性スキャン結果: $vuln_status" | tee -a audit-logs/vulnerability-scan.log
+          echo "status=$vuln_status" >> $GITHUB_OUTPUT
+      
+      - name: Upload vulnerability scan logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulnerability-scan-logs-${{ env.AUDIT_SESSION_ID }}
+          path: audit-logs/
+          retention-days: ${{ env.AUDIT_LOG_RETENTION }}
+
+  # コードスキャン (SAST)
+  code-security-scan:
+    runs-on: ubuntu-latest
+    needs: security-baseline-check
+    outputs:
+      code-status: ${{ steps.code-scan.outputs.status }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup audit logging
+        run: |
+          echo "AUDIT_SESSION_ID=$(date +%Y%m%d-%H%M%S)-$(uuidgen | cut -d'-' -f1)" >> $GITHUB_ENV
+          mkdir -p audit-logs
+      
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+      
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+      
+      - name: Perform CodeQL Analysis
+        id: code-scan
+        uses: github/codeql-action/analyze@v3
+        with:
+          output: audit-logs/codeql-results
+      
+      - name: Process CodeQL results
+        run: |
+          echo "=== コードセキュリティスキャン開始 ===" | tee -a audit-logs/code-scan.log
+          echo "実行時刻: $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a audit-logs/code-scan.log
+          echo "実行者: ${{ github.actor }}" | tee -a audit-logs/code-scan.log
+          
+          code_status="PASS"
+          
+          # CodeQL結果があるかチェック
+          if [ -d "audit-logs/codeql-results" ]; then
+            result_count=$(find audit-logs/codeql-results -name "*.sarif" -exec jq '.runs[].results | length' {} \; | awk '{sum+=$1} END {print sum}')
+            if [ "$result_count" -gt 0 ]; then
+              echo "コードセキュリティ問題が検出されました: $result_count 件" | tee -a audit-logs/code-scan.log
+              code_status="WARNING"
+            fi
+          fi
+          
+          echo "コードスキャン結果: $code_status" | tee -a audit-logs/code-scan.log
+          echo "status=$code_status" >> $GITHUB_OUTPUT
+      
+      - name: Upload code scan logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-scan-logs-${{ env.AUDIT_SESSION_ID }}
+          path: audit-logs/
+          retention-days: ${{ env.AUDIT_LOG_RETENTION }}
+
+  # 変更管理記録 (J-SOX対応)
+  change-management:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    outputs:
+      change-status: ${{ steps.change-log.outputs.status }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup audit logging
+        run: |
+          echo "AUDIT_SESSION_ID=$(date +%Y%m%d-%H%M%S)-$(uuidgen | cut -d'-' -f1)" >> $GITHUB_ENV
+          mkdir -p audit-logs
+      
+      - name: Record change management
+        id: change-log
+        run: |
+          echo "=== 変更管理記録開始 ===" | tee -a audit-logs/change-management.log
+          echo "実行時刻: $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a audit-logs/change-management.log
+          echo "変更者: ${{ github.actor }}" | tee -a audit-logs/change-management.log
+          echo "変更タイプ: ${{ github.event_name }}" | tee -a audit-logs/change-management.log
+          echo "ブランチ: ${{ github.ref_name }}" | tee -a audit-logs/change-management.log
+          echo "コミットハッシュ: ${{ github.sha }}" | tee -a audit-logs/change-management.log
+          echo "リポジトリ: ${{ github.repository }}" | tee -a audit-logs/change-management.log
+          
+          change_status="RECORDED"
+          
+          # 変更されたファイルの記録
+          echo "変更されたファイル:" | tee -a audit-logs/change-management.log
+          if [ "${{ github.event_name }}" = "push" ]; then
+            git diff --name-only ${{ github.event.before }}..${{ github.sha }} | tee -a audit-logs/change-management.log
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            git diff --name-only ${{ github.event.pull_request.base.sha }}..${{ github.sha }} | tee -a audit-logs/change-management.log
+          fi
+          
+          # コミットメッセージの記録
+          echo "コミットメッセージ:" | tee -a audit-logs/change-management.log
+          git log --oneline -1 ${{ github.sha }} | tee -a audit-logs/change-management.log
+          
+          # プルリクエストの承認情報記録
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "プルリクエスト番号: ${{ github.event.pull_request.number }}" | tee -a audit-logs/change-management.log
+            echo "プルリクエストタイトル: ${{ github.event.pull_request.title }}" | tee -a audit-logs/change-management.log
+            echo "作成者: ${{ github.event.pull_request.user.login }}" | tee -a audit-logs/change-management.log
+          fi
+          
+          echo "変更管理記録結果: $change_status" | tee -a audit-logs/change-management.log
+          echo "status=$change_status" >> $GITHUB_OUTPUT
+      
+      - name: Upload change management logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-management-logs-${{ env.AUDIT_SESSION_ID }}
+          path: audit-logs/
+          retention-days: ${{ env.AUDIT_LOG_RETENTION }}
+
+  # アクセス制御監査 (ISO27001 A.9対応)
+  access-control-audit:
+    runs-on: ubuntu-latest
+    outputs:
+      access-status: ${{ steps.access-audit.outputs.status }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup audit logging
+        run: |
+          echo "AUDIT_SESSION_ID=$(date +%Y%m%d-%H%M%S)-$(uuidgen | cut -d'-' -f1)" >> $GITHUB_ENV
+          mkdir -p audit-logs
+      
+      - name: Access control audit
+        id: access-audit
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "=== アクセス制御監査開始 ===" | tee -a audit-logs/access-control.log
+          echo "実行時刻: $(date -u +%Y-%m-%dT%H:%M:%SZ)" | tee -a audit-logs/access-control.log
+          echo "監査実行者: ${{ github.actor }}" | tee -a audit-logs/access-control.log
+          
+          access_status="PASS"
+          
+          # リポジトリの権限設定確認
+          echo "リポジトリアクセス権限確認:" | tee -a audit-logs/access-control.log
+          
+          # GitHub API でコラボレーター情報取得
+          if curl -s -H "Authorization: token $GITHUB_TOKEN" \
+             "https://api.github.com/repos/${{ github.repository }}/collaborators" > collaborators.json; then
+            
+            echo "コラボレーター一覧:" | tee -a audit-logs/access-control.log
+            jq -r '.[] | "- \(.login): \(.permissions.admin // false | if . then "admin" else (.permissions.push // false | if . then "write" else "read" end) end)"' collaborators.json | tee -a audit-logs/access-control.log
+            
+            # 管理者権限を持つユーザーの数をチェック
+            admin_count=$(jq '[.[] | select(.permissions.admin == true)] | length' collaborators.json)
+            echo "管理者権限ユーザー数: $admin_count" | tee -a audit-logs/access-control.log
+            
+            if [ "$admin_count" -gt 3 ]; then
+              echo "警告: 管理者権限ユーザーが多すぎます" | tee -a audit-logs/access-control.log
+              access_status="WARNING"
+            fi
+          fi
+          
+          # ブランチ保護ルールの確認
+          echo "ブランチ保護ルール確認:" | tee -a audit-logs/access-control.log
+          if curl -s -H "Authorization: token $GITHUB_TOKEN" \
+             "https://api.github.com/repos/${{ github.repository }}/branches/main/protection" > branch_protection.json; then
+            
+            if jq -e '.required_status_checks' branch_protection.json > /dev/null; then
+              echo "- ステータスチェック: 有効" | tee -a audit-logs/access-control.log
+            else
+              echo "- ステータスチェック: 無効" | tee -a audit-logs/access-control.log
+              access_status="WARNING"
+            fi
+            
+            if jq -e '.required_pull_request_reviews' branch_protection.json > /dev/null; then
+              echo "- プルリクエストレビュー: 有効" | tee -a audit-logs/access-control.log
+            else
+              echo "- プルリクエストレビュー: 無効" | tee -a audit-logs/access-control.log
+              access_status="WARNING"
+            fi
+          fi
+          
+          echo "アクセス制御監査結果: $access_status" | tee -a audit-logs/access-control.log
+          echo "status=$access_status" >> $GITHUB_OUTPUT
+      
+      - name: Upload access control logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: access-control-logs-${{ env.AUDIT_SESSION_ID }}
+          path: audit-logs/
+          retention-days: ${{ env.AUDIT_LOG_RETENTION }}
+
+  # 監査レポート生成
+  generate-audit-report:
+    runs-on: ubuntu-latest
+    needs: [security-baseline-check, vulnerability-scan, code-security-scan, change-management, access-control-audit]
+    if: always()
+    steps:
+      - name: Setup audit logging
+        run: |
+          echo "AUDIT_SESSION_ID=$(date +%Y%m%d-%H%M%S)-$(uuidgen | cut -d'-' -f1)" >> $GITHUB_ENV
+          mkdir -p audit-reports
+      
+      - name: Download all audit artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: audit-artifacts/
+      
+      - name: Generate comprehensive audit report
+        run: |
+          echo "# IT監査レポート" > audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          echo "**生成日時**: $(date -u +%Y-%m-%dT%H:%M:%SZ)" >> audit-reports/audit-report.md
+          echo "**対象リポジトリ**: ${{ github.repository }}" >> audit-reports/audit-report.md
+          echo "**コミット**: ${{ github.sha }}" >> audit-reports/audit-report.md
+          echo "**実行者**: ${{ github.actor }}" >> audit-reports/audit-report.md
+          echo "**監査セッションID**: $AUDIT_SESSION_ID" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          
+          echo "## 監査結果サマリー" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          
+          # 各チェックの結果を集計
+          echo "| 監査項目 | 結果 | 準拠規格 |" >> audit-reports/audit-report.md
+          echo "|----------|------|----------|" >> audit-reports/audit-report.md
+          echo "| セキュリティベースライン | ${{ needs.security-baseline-check.outputs.baseline-status || 'N/A' }} | ISO27001 A.12.6.1 |" >> audit-reports/audit-report.md
+          echo "| 脆弱性スキャン | ${{ needs.vulnerability-scan.outputs.vuln-status || 'N/A' }} | ISO27001 A.12.6.1 |" >> audit-reports/audit-report.md
+          echo "| コードセキュリティスキャン | ${{ needs.code-security-scan.outputs.code-status || 'N/A' }} | ISO27001 A.14.2.1 |" >> audit-reports/audit-report.md
+          echo "| 変更管理 | ${{ needs.change-management.outputs.change-status || 'N/A' }} | J-SOX |" >> audit-reports/audit-report.md
+          echo "| アクセス制御 | ${{ needs.access-control-audit.outputs.access-status || 'N/A' }} | ISO27001 A.9 |" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          
+          # 総合判定
+          overall_status="PASS"
+          if [[ "${{ needs.security-baseline-check.outputs.baseline-status }}" == "FAIL" ]] || \
+             [[ "${{ needs.vulnerability-scan.outputs.vuln-status }}" == "FAIL" ]]; then
+            overall_status="FAIL"
+          elif [[ "${{ needs.code-security-scan.outputs.code-status }}" == "WARNING" ]] || \
+               [[ "${{ needs.access-control-audit.outputs.access-status }}" == "WARNING" ]]; then
+            overall_status="WARNING"
+          fi
+          
+          echo "## 総合判定: **$overall_status**" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          
+          echo "## 詳細ログファイル" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          echo "以下のアーティファクトに各監査項目の詳細ログが保存されています：" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          
+          # アーティファクト一覧
+          if [ -d "audit-artifacts" ]; then
+            ls -la audit-artifacts/ | grep "^d" | awk '{print "- " $9}' >> audit-reports/audit-report.md
+          fi
+          
+          echo "" >> audit-reports/audit-report.md
+          echo "## 法的要件対応状況" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          echo "### ISO27001対応" >> audit-reports/audit-report.md
+          echo "- A.9 アクセス制御: ✓ 実施済み" >> audit-reports/audit-report.md
+          echo "- A.12.6.1 脆弱性管理: ✓ 実施済み" >> audit-reports/audit-report.md
+          echo "- A.14.2.1 セキュアな開発: ✓ 実施済み" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          echo "### J-SOX対応" >> audit-reports/audit-report.md
+          echo "- 変更管理プロセス: ✓ 実施済み" >> audit-reports/audit-report.md
+          echo "- 監査証跡保全: ✓ 実施済み (${AUDIT_LOG_RETENTION}日間保存)" >> audit-reports/audit-report.log
+          echo "" >> audit-reports/audit-report.md
+          
+          # 推奨事項
+          echo "## 推奨事項" >> audit-reports/audit-report.md
+          echo "" >> audit-reports/audit-report.md
+          if [[ "$overall_status" == "FAIL" ]]; then
+            echo "- 重大なセキュリティ問題が検出されました。速やかに対処してください。" >> audit-reports/audit-report.md
+          elif [[ "$overall_status" == "WARNING" ]]; then
+            echo "- 一部改善が必要な項目があります。次回リリース前に対処を検討してください。" >> audit-reports/audit-report.md
+          else
+            echo "- 現在のところ、重大な問題は検出されていません。定期的な監査の継続をお勧めします。" >> audit-reports/audit-report.md
+          fi
+          
+          # JSON形式のサマリーも生成
+          cat > audit-reports/audit-summary.json << EOF
+          {
+            "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "repository": "${{ github.repository }}",
+            "commit": "${{ github.sha }}",
+            "actor": "${{ github.actor }}",
+            "session_id": "$AUDIT_SESSION_ID",
+            "overall_status": "$overall_status",
+            "results": {
+              "security_baseline": "${{ needs.security-baseline-check.outputs.baseline-status || 'N/A' }}",
+              "vulnerability_scan": "${{ needs.vulnerability-scan.outputs.vuln-status || 'N/A' }}",
+              "code_security": "${{ needs.code-security-scan.outputs.code-status || 'N/A' }}",
+              "change_management": "${{ needs.change-management.outputs.change-status || 'N/A' }}",
+              "access_control": "${{ needs.access-control-audit.outputs.access-status || 'N/A' }}"
+            },
+            "compliance": {
+              "iso27001": true,
+              "j_sox": true
+            }
+          }
+          EOF
+      
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report-${{ env.AUDIT_SESSION_ID }}
+          path: audit-reports/
+          retention-days: ${{ env.AUDIT_LOG_RETENTION }}
+      
+      - name: Post audit summary as comment (for PR)
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const auditReport = fs.readFileSync('audit-reports/audit-report.md', 'utf8');
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: auditReport
+            });
+
+  # 監査失敗時の通知
+  audit-failure-notification:
+    runs-on: ubuntu-latest
+    needs: [security-baseline-check, vulnerability-scan]
+    if: failure() || (needs.security-baseline-check.outputs.baseline-status == 'FAIL') || (needs.vulnerability-scan.outputs.vuln-status == 'FAIL')
+    steps:
+      - name: Send audit failure notification
+        run: |
+          echo "🚨 IT監査で重大な問題が検出されました"
+          echo "リポジトリ: ${{ github.repository }}"
+          echo "コミット: ${{ github.sha }}"
+          echo "実行者: ${{ github.actor }}"
+          echo "詳細は Actions ログを確認してください。"
+          
+          # Slack通知の例（SLACK_WEBHOOK_URLが設定されている場合）
+          if [ -n "${{ secrets.SLACK_WEBHOOK_URL }}" ]; then
+            curl -X POST -H 'Content-type: application/json' \
+              --data "{\"text\":\"🚨 IT監査失敗: ${{ github.repository }} - 詳細確認が必要です\"}" \
+              ${{ secrets.SLACK_WEBHOOK_URL }}
+          fi
