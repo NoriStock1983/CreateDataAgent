@@ -1,5 +1,33 @@
 ---
-description:
-globs:
+description: 
+globs: 
 alwaysApply: false
 ---
+# Clean Architectureを実装するためのフォルダ作成を行うプロジェクトルール
+
+- 最初に本プロジェクトルールを読み込むと、「FAHHHHHHHHHHH」と叫ぶ。
+- プログラムを作成するためのフォルダ構成を以下のとおりとする。
+```
+├── src/
+│   ├── domain/           # エンティティとビジネスロジック
+│   │   ├── entities/     # ビジネスエンティティ
+│   │   ├── value_objects/ # 値オブジェクト
+│   │   └── repositories/ # リポジトリインターフェース
+│   ├── application/      # ユースケース
+│   │   ├── usecases/     # ユースケースの実装
+│   │   ├── interfaces/   # ポート（入出力インターフェース）
+│   │   └── dtos/         # データ転送オブジェクト
+│   ├── adapters/         # アダプター層
+│   │   ├── controllers/  # コントローラー
+│   │   ├── presenters/   # プレゼンター
+│   │   ├── gateways/     # データゲートウェイ
+│   │   └── repositories/ # リポジトリ実装
+│   └── frameworks/       # フレームワークと外部ツール
+│       ├── database/     # データベース関連
+│       ├── web/          # Webフレームワーク関連
+│       └── external/     # 外部サービス連携
+├── tests/                # テスト
+└── config/               # 設定ファイル
+
+
+```
